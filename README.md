@@ -2,7 +2,7 @@
 
 GitLab offline delivery repository for Kubernetes.
 
-This repository follows the same delivery contract as `apps_redis-cluster`: it builds a self-contained `.run` package containing GitLab manifests, image metadata, and container image tar files. The installer can import images into an internal registry, install GitLab into Kubernetes, keep data persisted by PVCs, expose GitLab through Envoy Gateway API, and enable Casdoor OIDC login.
+This repository follows the same delivery contract as `apps_redis-cluster`: it builds a self-contained `.run` package containing GitLab manifests, image metadata, and container image tar files. The installer can import images into an internal registry, install GitLab into Kubernetes, keep data persisted by PVCs, expose GitLab through Envoy Gateway API, enable external OIDC login, and optionally configure GitLab external authorization.
 
 ## What This Installer Deploys
 
@@ -12,7 +12,7 @@ It creates:
 
 - `Namespace`
 - `ConfigMap` for `GITLAB_OMNIBUS_CONFIG`
-- `Secret` for initial root password and optional Casdoor OIDC client secret
+- `Secret` for initial root password and optional OIDC client secret
 - `Service` for HTTP and SSH inside the cluster
 - `StatefulSet` with startup, readiness, and liveness probes
 - three persistent volume claim templates:
@@ -61,9 +61,9 @@ Install when images already exist in the internal registry:
   -y
 ```
 
-## Casdoor OIDC
+## External OIDC
 
-Create a Casdoor application for GitLab and configure its redirect URI as:
+Create an OIDC application for GitLab and configure its redirect URI as:
 
 ```text
 https://gitlab.aisphere.local/users/auth/openid_connect/callback
@@ -84,6 +84,70 @@ Then install GitLab with OIDC enabled:
 ```
 
 The generated Omnibus config enables GitLab OmniAuth with the `openid_connect` provider. It uses `sub` as the default UID field because it is expected to be stable and immutable.
+
+## External Authorization Service
+
+GitLab external authorization is configured after the StatefulSet is ready by running `gitlab-rails runner` inside the GitLab pod. This is intentional: external authorization is stored in GitLab application settings rather than only in static Kubernetes manifests.
+
+Enable external authorization:
+
+```bash
+./dist/gitlab-installer-amd64.run install \
+  --hostname gitlab.aisphere.local \
+  --enable-external-authz \
+  --external-authz-url http://iam.aisphere.svc.cluster.local:8080/v1/gitlab/authz \
+  --external-authz-default-label aisphere \
+  -y
+```
+
+Enable OIDC and external authorization together:
+
+```bash
+./dist/gitlab-installer-amd64.run install \
+  --hostname gitlab.aisphere.local \
+  --enable-oidc \
+  --oidc-issuer https://casdoor.aisphere.local \
+  --oidc-client-id gitlab \
+  --oidc-client-secret 'replace-me' \
+  --enable-external-authz \
+  --external-authz-url http://iam.aisphere.svc.cluster.local:8080/v1/gitlab/authz \
+  --external-authz-default-label aisphere \
+  -y
+```
+
+Disable external authorization explicitly:
+
+```bash
+./dist/gitlab-installer-amd64.run install \
+  --disable-external-authz \
+  -y
+```
+
+External authorization options:
+
+| Option | Meaning |
+| --- | --- |
+| `--enable-external-authz` | enable GitLab external authorization after rollout |
+| `--disable-external-authz` | disable GitLab external authorization after rollout |
+| `--external-authz-url <url>` | external authorization service URL; required when enabling |
+| `--external-authz-default-label <val>` | default project classification label, default `aisphere` |
+| `--external-authz-retries <num>` | retry count for `gitlab-rails runner`, default `30` |
+| `--external-authz-retry-interval <s>` | retry interval in seconds, default `10` |
+| `--external-authz-best-effort` | do not fail install if the running GitLab version does not expose the expected ApplicationSetting fields |
+
+GitLab sends the external service a JSON `POST` with user and project classification data. Your service should return `200` to allow access and `401` or `403` to deny access. A typical adapter can map `user_identifier` or OIDC `identities` to an internal user, then query SpiceDB or another policy engine.
+
+Suggested adapter contract:
+
+```text
+GitLab
+  -> POST /v1/gitlab/authz
+      user_identifier
+      project_classification_label
+      identities[]
+  -> IAM / SpiceDB adapter
+  -> 200 allow, 401/403 deny
+```
 
 ## Envoy Gateway API Exposure
 
@@ -139,7 +203,8 @@ If SSH through Gateway is not enabled, users can still use Git over HTTPS throug
 | wait timeout | `30m` |
 | target registry repo | `sealos.hub:5000/kube4` |
 | Gateway HTTPRoute | enabled |
-| Casdoor OIDC | disabled unless `--enable-oidc` is set |
+| OIDC | disabled unless `--enable-oidc` is set |
+| external authorization | unchanged unless `--enable-external-authz` or `--disable-external-authz` is set |
 
 Default image metadata is in `images/image.json`:
 
@@ -199,6 +264,7 @@ Install side:
 4. it renders Kubernetes manifests
 5. it applies the StatefulSet, Services, PVC templates and Gateway routes
 6. it waits for StatefulSet rollout
+7. if requested, it configures external authorization with `gitlab-rails runner`
 
 ## Common Commands
 
@@ -247,5 +313,7 @@ In a cluster with pre-pushed images:
   --enable-oidc \
   --oidc-client-id gitlab \
   --oidc-client-secret 'replace-me' \
+  --enable-external-authz \
+  --external-authz-url http://iam.aisphere.svc.cluster.local:8080/v1/gitlab/authz \
   -y
 ```
