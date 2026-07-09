@@ -1,0 +1,15 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: __RELEASE_NAME__
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: gitlab
+    app.kubernetes.io/instance: __RELEASE_NAME__
+    app.kubernetes.io/managed-by: archinfra-installer
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gitlab
+      app.kubernetes.io/instance: __RELEASE_NAME__
