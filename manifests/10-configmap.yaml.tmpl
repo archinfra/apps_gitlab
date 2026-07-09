@@ -31,9 +31,4 @@ data:
     puma['worker_processes'] = __PUMA_WORKERS__
     sidekiq['max_concurrency'] = __SIDEKIQ_CONCURRENCY__
 
-    # PostgreSQL, Redis, Gitaly, repositories and uploads are persisted under /var/opt/gitlab.
-    git_data_dirs({
-      'default' => { 'path' => '/var/opt/gitlab/git-data' }
-    })
-
-__OIDC_CONFIG__
+    __OIDC_CONFIG__

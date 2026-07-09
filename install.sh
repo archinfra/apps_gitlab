@@ -15,7 +15,7 @@ NAMESPACE="gitlab-system"
 HOSTNAME="gitlab.aisphere.local"
 EXTERNAL_URL=""
 TIMEZONE="Asia/Shanghai"
-ROOT_PASSWORD="GitLab@Passw0rd"
+ROOT_PASSWORD="GitLab@ChangeMe1234"
 STORAGE_CLASS="nfs"
 CONFIG_STORAGE_SIZE="5Gi"
 LOGS_STORAGE_SIZE="20Gi"
@@ -46,6 +46,8 @@ GATEWAY_HTTP_SECTION="https"
 ENABLE_SSH_ROUTE="false"
 GATEWAY_SSH_SECTION="ssh"
 SSH_EXTERNAL_PORT="22"
+PRIVILEGED="false"
+ROUTE_NAMESPACE=""
 
 ENABLE_OIDC="false"
 OIDC_PROVIDER_LABEL="Casdoor"
@@ -140,6 +142,7 @@ External authorization service:
   --external-authz-best-effort         Do not fail install when GitLab does not expose expected settings
 
 Other:
+  --privileged                         Run GitLab container in privileged mode (required for some kernels)
   --delete-pvc                         With uninstall, also delete PVCs created by this release
   -y, --yes                            Skip confirmation
   -h, --help                           Show help
@@ -190,6 +193,7 @@ parse_args(){
       --disable-ssh-route) ENABLE_SSH_ROUTE="false"; shift ;;
       --gateway-ssh-section) [[ $# -ge 2 ]] || die "Missing value for $1"; GATEWAY_SSH_SECTION="$2"; shift 2 ;;
       --ssh-external-port) [[ $# -ge 2 ]] || die "Missing value for $1"; SSH_EXTERNAL_PORT="$2"; shift 2 ;;
+      --privileged) PRIVILEGED="true"; shift ;;
       --enable-oidc) ENABLE_OIDC="true"; shift ;;
       --disable-oidc) ENABLE_OIDC="false"; shift ;;
       --oidc-label) [[ $# -ge 2 ]] || die "Missing value for $1"; OIDC_PROVIDER_LABEL="$2"; shift 2 ;;
@@ -218,6 +222,12 @@ parse_args(){
 normalize_flags(){
   [[ -n "${EXTERNAL_URL}" ]] || EXTERNAL_URL="https://${HOSTNAME}"
   [[ -n "${OIDC_REDIRECT_URI}" ]] || OIDC_REDIRECT_URI="${EXTERNAL_URL%/}/users/auth/openid_connect/callback"
+  # Gateway routes must be in the same namespace as the Gateway if its listener restricts to Same
+  if [[ "${GATEWAY_NAMESPACE}" != "${NAMESPACE}" ]]; then
+    ROUTE_NAMESPACE="${GATEWAY_NAMESPACE}"
+  else
+    ROUTE_NAMESPACE="${NAMESPACE}"
+  fi
   case "${IMAGE_PULL_POLICY}" in Always|IfNotPresent|Never) ;; *) die "Unsupported image pull policy: ${IMAGE_PULL_POLICY}" ;; esac
   case "${RESOURCE_PROFILE,,}" in
     low) RESOURCE_PROFILE="low"; CPU_REQUEST="2"; CPU_LIMIT="4"; MEMORY_REQUEST="6Gi"; MEMORY_LIMIT="8Gi"; PUMA_WORKERS="2"; SIDEKIQ_CONCURRENCY="10" ;;
@@ -268,9 +278,10 @@ confirm(){
       echo "External authz URL      : ${EXTERNAL_AUTHZ_URL}"
       echo "External authz label    : ${EXTERNAL_AUTHZ_DEFAULT_LABEL}"
     fi
-    echo "Registry repo           : ${REGISTRY_REPO}"
-    echo "Skip image prepare      : ${SKIP_IMAGE_PREPARE}"
-    echo "Wait timeout            : ${WAIT_TIMEOUT}"
+echo "Registry repo           : ${REGISTRY_REPO}"
+	    echo "Skip image prepare      : ${SKIP_IMAGE_PREPARE}"
+	    echo "Privileged mode         : ${PRIVILEGED}"
+	    echo "Wait timeout            : ${WAIT_TIMEOUT}"
   fi
   if [[ "${ACTION}" == "uninstall" ]]; then echo "Delete PVC              : ${DELETE_PVC}"; fi
   echo; read -r -p "Continue? [y/N] " answer; [[ "${answer}" =~ ^[Yy]$ ]] || die "Cancelled"
@@ -356,6 +367,7 @@ replace_placeholders(){
   line="${line//__GITLAB_IMAGE__/${GITLAB_IMAGE}}"; line="${line//__IMAGE_PULL_POLICY__/${IMAGE_PULL_POLICY}}"; line="${line//__STORAGE_CLASS__/${STORAGE_CLASS}}"; line="${line//__CONFIG_STORAGE_SIZE__/${CONFIG_STORAGE_SIZE}}"; line="${line//__LOGS_STORAGE_SIZE__/${LOGS_STORAGE_SIZE}}"; line="${line//__DATA_STORAGE_SIZE__/${DATA_STORAGE_SIZE}}"
   line="${line//__CPU_REQUEST__/${CPU_REQUEST}}"; line="${line//__CPU_LIMIT__/${CPU_LIMIT}}"; line="${line//__MEMORY_REQUEST__/${MEMORY_REQUEST}}"; line="${line//__MEMORY_LIMIT__/${MEMORY_LIMIT}}"; line="${line//__PUMA_WORKERS__/${PUMA_WORKERS}}"; line="${line//__SIDEKIQ_CONCURRENCY__/${SIDEKIQ_CONCURRENCY}}"; line="${line//__ENABLE_EMBEDDED_PROMETHEUS__/${ENABLE_EMBEDDED_PROMETHEUS}}"
   line="${line//__GATEWAY_NAME__/${GATEWAY_NAME}}"; line="${line//__GATEWAY_NAMESPACE__/${GATEWAY_NAMESPACE}}"; line="${line//__GATEWAY_HTTP_SECTION__/${GATEWAY_HTTP_SECTION}}"; line="${line//__GATEWAY_SSH_SECTION__/${GATEWAY_SSH_SECTION}}"; line="${line//__SSH_EXTERNAL_PORT__/${SSH_EXTERNAL_PORT}}"
+  line="${line//__PRIVILEGED__/${PRIVILEGED}}"; line="${line//__ROUTE_NAMESPACE__/${ROUTE_NAMESPACE}}"
   printf '%s\n' "${line}"
 }
 render_template(){ local template="$1" output="$2" oidc_config_file="$3" line; : > "${output}"; while IFS= read -r line || [[ -n "${line}" ]]; do if [[ "${line}" == "__OIDC_CONFIG__" ]]; then cat "${oidc_config_file}" >> "${output}"; else replace_placeholders "${line}" >> "${output}"; fi; done < "${template}"; }

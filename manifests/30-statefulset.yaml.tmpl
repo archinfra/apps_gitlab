@@ -29,6 +29,8 @@ spec:
         fsGroup: 0
       containers:
         - name: gitlab
+          securityContext:
+            privileged: __PRIVILEGED__
           image: __GITLAB_IMAGE__
           imagePullPolicy: __IMAGE_PULL_POLICY__
           ports:
