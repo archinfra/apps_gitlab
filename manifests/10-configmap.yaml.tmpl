@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: __RELEASE_NAME__-config
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: gitlab
+    app.kubernetes.io/instance: __RELEASE_NAME__
+    app.kubernetes.io/managed-by: archinfra-installer
+data:
+  gitlab.rb: |
+    external_url '__EXTERNAL_URL__'
+
+    # TLS is terminated by Envoy Gateway. GitLab still generates HTTPS URLs.
+    nginx['listen_port'] = 80
+    nginx['listen_https'] = false
+    nginx['redirect_http_to_https'] = false
+    nginx['proxy_set_headers'] = {
+      'X-Forwarded-Proto' => 'https',
+      'X-Forwarded-Ssl' => 'on'
+    }
+
+    gitlab_rails['time_zone'] = '__TIMEZONE__'
+    gitlab_rails['gitlab_shell_ssh_port'] = __SSH_EXTERNAL_PORT__
+    gitlab_rails['initial_root_password'] = ENV['GITLAB_ROOT_PASSWORD']
+
+    prometheus_monitoring['enable'] = __ENABLE_EMBEDDED_PROMETHEUS__
+    alertmanager['enable'] = false
+
+    # Keep a single Omnibus pod predictable in Kubernetes.
+    puma['worker_processes'] = __PUMA_WORKERS__
+    sidekiq['max_concurrency'] = __SIDEKIQ_CONCURRENCY__
+
+    # PostgreSQL, Redis, Gitaly, repositories and uploads are persisted under /var/opt/gitlab.
+    git_data_dirs({
+      'default' => { 'path' => '/var/opt/gitlab/git-data' }
+    })
+
+__OIDC_CONFIG__
