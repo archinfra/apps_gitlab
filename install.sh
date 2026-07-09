@@ -370,7 +370,7 @@ replace_placeholders(){
   line="${line//__PRIVILEGED__/${PRIVILEGED}}"; line="${line//__ROUTE_NAMESPACE__/${ROUTE_NAMESPACE}}"
   printf '%s\n' "${line}"
 }
-render_template(){ local template="$1" output="$2" oidc_config_file="$3" line; : > "${output}"; while IFS= read -r line || [[ -n "${line}" ]]; do if [[ "${line}" == "__OIDC_CONFIG__" ]]; then cat "${oidc_config_file}" >> "${output}"; else replace_placeholders "${line}" >> "${output}"; fi; done < "${template}"; }
+render_template(){ local template="$1" output="$2" oidc_config_file="$3" line; : > "${output}"; while IFS= read -r line || [[ -n "${line}" ]]; do if [[ "${line// }" == "__OIDC_CONFIG__" ]]; then local indent="${line%%[^ ]*}"; while IFS= read -r oidc_line; do echo "${indent}${oidc_line}" >> "${output}"; done < "${oidc_config_file}"; else replace_placeholders "${line}" >> "${output}"; fi; done < "${template}"; }
 render_and_apply(){ local template="$1" rendered="$2" oidc_config_file="$3"; render_template "${template}" "${rendered}" "${oidc_config_file}"; kubectl apply -f "${rendered}"; }
 has_crd(){ local crd="$1"; kubectl get crd "${crd}" >/dev/null 2>&1; }
 
