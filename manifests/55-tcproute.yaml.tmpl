@@ -1,0 +1,18 @@
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TCPRoute
+metadata:
+  name: __RELEASE_NAME__-ssh
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: gitlab
+    app.kubernetes.io/instance: __RELEASE_NAME__
+    app.kubernetes.io/managed-by: archinfra-installer
+spec:
+  parentRefs:
+    - name: __GATEWAY_NAME__
+      namespace: __GATEWAY_NAMESPACE__
+      sectionName: __GATEWAY_SSH_SECTION__
+  rules:
+    - backendRefs:
+        - name: __RELEASE_NAME__
+          port: 22
