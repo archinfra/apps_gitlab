@@ -1,0 +1,140 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: __RELEASE_NAME__
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: gitlab
+    app.kubernetes.io/instance: __RELEASE_NAME__
+    app.kubernetes.io/managed-by: archinfra-installer
+spec:
+  serviceName: __RELEASE_NAME__
+  replicas: 1
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gitlab
+      app.kubernetes.io/instance: __RELEASE_NAME__
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gitlab
+        app.kubernetes.io/instance: __RELEASE_NAME__
+        app.kubernetes.io/managed-by: archinfra-installer
+    spec:
+      terminationGracePeriodSeconds: 300
+      securityContext:
+        fsGroup: 0
+      containers:
+        - name: gitlab
+          image: __GITLAB_IMAGE__
+          imagePullPolicy: __IMAGE_PULL_POLICY__
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+            - name: ssh
+              containerPort: 22
+              protocol: TCP
+          env:
+            - name: TZ
+              value: __TIMEZONE__
+            - name: GITLAB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: __RELEASE_NAME__-secrets
+                  key: root-password
+            - name: CASDOOR_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: __RELEASE_NAME__-secrets
+                  key: casdoor-client-secret
+                  optional: true
+            - name: GITLAB_OMNIBUS_CONFIG
+              valueFrom:
+                configMapKeyRef:
+                  name: __RELEASE_NAME__-config
+                  key: gitlab.rb
+          resources:
+            requests:
+              cpu: __CPU_REQUEST__
+              memory: __MEMORY_REQUEST__
+            limits:
+              cpu: __CPU_LIMIT__
+              memory: __MEMORY_LIMIT__
+          startupProbe:
+            httpGet:
+              path: /users/sign_in
+              port: http
+              scheme: HTTP
+            failureThreshold: 90
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /users/sign_in
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /users/sign_in
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/bash
+                  - -ec
+                  - gitlab-ctl stop || true
+          volumeMounts:
+            - name: gitlab-config
+              mountPath: /etc/gitlab
+            - name: gitlab-logs
+              mountPath: /var/log/gitlab
+            - name: gitlab-data
+              mountPath: /var/opt/gitlab
+  volumeClaimTemplates:
+    - metadata:
+        name: gitlab-config
+        labels:
+          app.kubernetes.io/name: gitlab
+          app.kubernetes.io/instance: __RELEASE_NAME__
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: __STORAGE_CLASS__
+        resources:
+          requests:
+            storage: __CONFIG_STORAGE_SIZE__
+    - metadata:
+        name: gitlab-logs
+        labels:
+          app.kubernetes.io/name: gitlab
+          app.kubernetes.io/instance: __RELEASE_NAME__
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: __STORAGE_CLASS__
+        resources:
+          requests:
+            storage: __LOGS_STORAGE_SIZE__
+    - metadata:
+        name: gitlab-data
+        labels:
+          app.kubernetes.io/name: gitlab
+          app.kubernetes.io/instance: __RELEASE_NAME__
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: __STORAGE_CLASS__
+        resources:
+          requests:
+            storage: __DATA_STORAGE_SIZE__
