@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="gitlab"
-APP_VERSION="0.1.0"
+APP_VERSION="0.1.1"
 WORKDIR="/tmp/${APP_NAME}-installer"
 PAYLOAD_ARCHIVE="${WORKDIR}/payload.tar.gz"
 MANIFEST_DIR="${WORKDIR}/manifests"
@@ -57,22 +57,22 @@ OIDC_SCOPE="openid profile email"
 OIDC_UID_FIELD="sub"
 OIDC_AUTO_SIGN_IN="false"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+EXTERNAL_AUTHZ_MODE="skip"
+EXTERNAL_AUTHZ_URL=""
+EXTERNAL_AUTHZ_DEFAULT_LABEL="aisphere"
+EXTERNAL_AUTHZ_RETRIES="30"
+EXTERNAL_AUTHZ_RETRY_INTERVAL="10"
+EXTERNAL_AUTHZ_FAIL_ON_UNSUPPORTED="true"
 
-log() { echo -e "${CYAN}[INFO]${NC} $*"; }
-success() { echo -e "${GREEN}[OK]${NC} $*"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
-die() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
-section() { echo; echo -e "${BLUE}${BOLD}============================================================${NC}"; echo -e "${BLUE}${BOLD}$*${NC}"; echo -e "${BLUE}${BOLD}============================================================${NC}"; }
-program_name() { basename "$0"; }
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+log(){ echo -e "${CYAN}[INFO]${NC} $*"; }
+success(){ echo -e "${GREEN}[OK]${NC} $*"; }
+warn(){ echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
+die(){ echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+section(){ echo; echo -e "${BLUE}${BOLD}============================================================${NC}"; echo -e "${BLUE}${BOLD}$*${NC}"; echo -e "${BLUE}${BOLD}============================================================${NC}"; }
+program_name(){ basename "$0"; }
 
-usage() {
+usage(){
   local cmd="./$(program_name)"
   cat <<EOF_USAGE
 Usage:
@@ -118,17 +118,26 @@ Envoy Gateway API exposure:
   --gateway-ssh-section <section>      Gateway TCP listener sectionName, default: ${GATEWAY_SSH_SECTION}
   --ssh-external-port <port>           External SSH port shown by GitLab, default: ${SSH_EXTERNAL_PORT}
 
-Casdoor OIDC:
+Casdoor or other OIDC provider:
   --enable-oidc                        Enable GitLab OmniAuth OpenID Connect provider
   --disable-oidc                       Disable OIDC, default
   --oidc-label <label>                 Login button label, default: ${OIDC_PROVIDER_LABEL}
-  --oidc-issuer <url>                  Casdoor issuer URL, default: ${OIDC_ISSUER}
-  --oidc-client-id <id>                Casdoor application client id
-  --oidc-client-secret <secret>        Casdoor application client secret
+  --oidc-issuer <url>                  OIDC issuer URL, default: ${OIDC_ISSUER}
+  --oidc-client-id <id>                OIDC application client id
+  --oidc-client-secret <secret>        OIDC application client secret
   --oidc-redirect-uri <url>            Default: <external-url>/users/auth/openid_connect/callback
   --oidc-scope <scope>                 Space-separated scope string, default: ${OIDC_SCOPE}
   --oidc-uid-field <claim>             Stable user id claim, default: ${OIDC_UID_FIELD}
-  --oidc-auto-sign-in                  Redirect login page directly to Casdoor
+  --oidc-auto-sign-in                  Redirect login page directly to the OIDC provider
+
+External authorization service:
+  --enable-external-authz              Enable GitLab external authorization after rollout
+  --disable-external-authz             Disable GitLab external authorization after rollout
+  --external-authz-url <url>           External authz service URL, required with --enable-external-authz
+  --external-authz-default-label <val> Default project classification label, default: ${EXTERNAL_AUTHZ_DEFAULT_LABEL}
+  --external-authz-retries <num>       Rails runner retry count, default: ${EXTERNAL_AUTHZ_RETRIES}
+  --external-authz-retry-interval <s>  Rails runner retry interval seconds, default: ${EXTERNAL_AUTHZ_RETRY_INTERVAL}
+  --external-authz-best-effort         Do not fail install when GitLab does not expose expected settings
 
 Other:
   --delete-pvc                         With uninstall, also delete PVCs created by this release
@@ -139,15 +148,17 @@ Examples:
   ${cmd} install --storage-class nfs --hostname gitlab.aisphere.local -y
   ${cmd} install --registry harbor.example.com/kube4 --skip-image-prepare -y
   ${cmd} install --enable-oidc --oidc-client-id gitlab --oidc-client-secret 'secret' -y
+  ${cmd} install --enable-external-authz --external-authz-url http://iam.gitlab-system.svc.cluster.local:8080/v1/gitlab/authz -y
+  ${cmd} install --enable-oidc --oidc-client-id gitlab --oidc-client-secret 'secret' --enable-external-authz --external-authz-url http://iam.aisphere.svc.cluster.local:8080/v1/gitlab/authz -y
   ${cmd} status -n gitlab-system
   ${cmd} uninstall -n gitlab-system -y
 EOF_USAGE
 }
 
-cleanup() { rm -rf "${WORKDIR}"; }
+cleanup(){ rm -rf "${WORKDIR}"; }
 trap cleanup EXIT
 
-parse_args() {
+parse_args(){
   if [[ $# -eq 0 ]]; then ACTION="help"; return; fi
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -189,6 +200,13 @@ parse_args() {
       --oidc-scope) [[ $# -ge 2 ]] || die "Missing value for $1"; OIDC_SCOPE="$2"; shift 2 ;;
       --oidc-uid-field) [[ $# -ge 2 ]] || die "Missing value for $1"; OIDC_UID_FIELD="$2"; shift 2 ;;
       --oidc-auto-sign-in) OIDC_AUTO_SIGN_IN="true"; shift ;;
+      --enable-external-authz) EXTERNAL_AUTHZ_MODE="enable"; shift ;;
+      --disable-external-authz) EXTERNAL_AUTHZ_MODE="disable"; shift ;;
+      --external-authz-url) [[ $# -ge 2 ]] || die "Missing value for $1"; EXTERNAL_AUTHZ_URL="$2"; shift 2 ;;
+      --external-authz-default-label) [[ $# -ge 2 ]] || die "Missing value for $1"; EXTERNAL_AUTHZ_DEFAULT_LABEL="$2"; shift 2 ;;
+      --external-authz-retries) [[ $# -ge 2 ]] || die "Missing value for $1"; EXTERNAL_AUTHZ_RETRIES="$2"; shift 2 ;;
+      --external-authz-retry-interval) [[ $# -ge 2 ]] || die "Missing value for $1"; EXTERNAL_AUTHZ_RETRY_INTERVAL="$2"; shift 2 ;;
+      --external-authz-best-effort) EXTERNAL_AUTHZ_FAIL_ON_UNSUPPORTED="false"; shift ;;
       --delete-pvc) DELETE_PVC="true"; shift ;;
       -y|--yes) AUTO_YES="true"; shift ;;
       -h|--help) ACTION="help"; shift ;;
@@ -197,7 +215,7 @@ parse_args() {
   done
 }
 
-normalize_flags() {
+normalize_flags(){
   [[ -n "${EXTERNAL_URL}" ]] || EXTERNAL_URL="https://${HOSTNAME}"
   [[ -n "${OIDC_REDIRECT_URI}" ]] || OIDC_REDIRECT_URI="${EXTERNAL_URL%/}/users/auth/openid_connect/callback"
   case "${IMAGE_PULL_POLICY}" in Always|IfNotPresent|Never) ;; *) die "Unsupported image pull policy: ${IMAGE_PULL_POLICY}" ;; esac
@@ -212,16 +230,24 @@ normalize_flags() {
     [[ -n "${OIDC_CLIENT_SECRET}" ]] || die "--oidc-client-secret is required when --enable-oidc is used"
     [[ "${OIDC_ISSUER}" =~ ^https?:// ]] || die "--oidc-issuer must be an http(s) URL"
   fi
+  case "${EXTERNAL_AUTHZ_MODE}" in
+    skip|disable) ;;
+    enable)
+      [[ -n "${EXTERNAL_AUTHZ_URL}" ]] || die "--external-authz-url is required when --enable-external-authz is used"
+      [[ "${EXTERNAL_AUTHZ_URL}" =~ ^https?:// ]] || die "--external-authz-url must be an http(s) URL"
+      ;;
+    *) die "Unsupported external authz mode: ${EXTERNAL_AUTHZ_MODE}" ;;
+  esac
+  [[ "${EXTERNAL_AUTHZ_RETRIES}" =~ ^[0-9]+$ ]] || die "--external-authz-retries must be a non-negative integer"
+  [[ "${EXTERNAL_AUTHZ_RETRY_INTERVAL}" =~ ^[0-9]+$ ]] || die "--external-authz-retry-interval must be a non-negative integer"
 }
 
-check_deps() {
+check_deps(){
   command -v kubectl >/dev/null 2>&1 || die "kubectl is required"
-  if [[ "${ACTION}" == "install" && "${SKIP_IMAGE_PREPARE}" != "true" ]]; then
-    command -v docker >/dev/null 2>&1 || die "docker is required unless --skip-image-prepare is used"
-  fi
+  if [[ "${ACTION}" == "install" && "${SKIP_IMAGE_PREPARE}" != "true" ]]; then command -v docker >/dev/null 2>&1 || die "docker is required unless --skip-image-prepare is used"; fi
 }
 
-confirm() {
+confirm(){
   [[ "${AUTO_YES}" == "true" ]] && return 0
   section "部署配置确认"
   echo "Action                  : ${ACTION}"
@@ -236,21 +262,23 @@ confirm() {
     echo "Resource profile        : ${RESOURCE_PROFILE} (${CPU_REQUEST}/${MEMORY_REQUEST} -> ${CPU_LIMIT}/${MEMORY_LIMIT})"
     echo "Gateway HTTPRoute       : ${ENABLE_GATEWAY} (${GATEWAY_NAMESPACE}/${GATEWAY_NAME}/${GATEWAY_HTTP_SECTION})"
     echo "Gateway SSH TCPRoute    : ${ENABLE_SSH_ROUTE} (${GATEWAY_SSH_SECTION})"
-    echo "Casdoor OIDC            : ${ENABLE_OIDC}"
+    echo "OIDC                    : ${ENABLE_OIDC}"
+    echo "External authz          : ${EXTERNAL_AUTHZ_MODE}"
+    if [[ "${EXTERNAL_AUTHZ_MODE}" == "enable" ]]; then
+      echo "External authz URL      : ${EXTERNAL_AUTHZ_URL}"
+      echo "External authz label    : ${EXTERNAL_AUTHZ_DEFAULT_LABEL}"
+    fi
     echo "Registry repo           : ${REGISTRY_REPO}"
     echo "Skip image prepare      : ${SKIP_IMAGE_PREPARE}"
     echo "Wait timeout            : ${WAIT_TIMEOUT}"
   fi
   if [[ "${ACTION}" == "uninstall" ]]; then echo "Delete PVC              : ${DELETE_PVC}"; fi
-  echo
-  read -r -p "Continue? [y/N] " answer
-  [[ "${answer}" =~ ^[Yy]$ ]] || die "Cancelled"
+  echo; read -r -p "Continue? [y/N] " answer; [[ "${answer}" =~ ^[Yy]$ ]] || die "Cancelled"
 }
 
-payload_start_offset() {
+payload_start_offset(){
   local marker_line payload_offset skip_bytes byte_hex
-  marker_line="$(awk '/^__PAYLOAD_BELOW__$/ { print NR; exit }' "$0")"
-  [[ -n "${marker_line}" ]] || die "Payload marker not found"
+  marker_line="$(awk '/^__PAYLOAD_BELOW__$/ { print NR; exit }' "$0")"; [[ -n "${marker_line}" ]] || die "Payload marker not found"
   payload_offset="$(( $(head -n "${marker_line}" "$0" | wc -c | tr -d ' ') + 1 ))"
   skip_bytes=0
   while :; do
@@ -260,85 +288,45 @@ payload_start_offset() {
   printf '%s\n' "$((payload_offset + skip_bytes))"
 }
 
-extract_payload() {
+extract_payload(){
   log "Extracting embedded payload to ${WORKDIR}"
-  rm -rf "${WORKDIR}"
-  mkdir -p "${WORKDIR}"
+  rm -rf "${WORKDIR}"; mkdir -p "${WORKDIR}"
   tail -c +"$(payload_start_offset)" "$0" | tar -xzf - -C "${WORKDIR}" || die "Failed to extract payload"
-  [[ -d "${MANIFEST_DIR}" ]] || die "Missing manifest payload"
-  [[ -f "${IMAGE_INDEX}" ]] || die "Missing image metadata payload"
+  [[ -d "${MANIFEST_DIR}" ]] || die "Missing manifest payload"; [[ -f "${IMAGE_INDEX}" ]] || die "Missing image metadata payload"
 }
 
-image_name_from_ref() { local ref="$1"; local name_tag="${ref##*/}"; echo "${name_tag%%:*}"; }
-image_name_tag_from_ref() { local ref="$1"; echo "${ref##*/}"; }
-resolve_target_ref() { local default_ref="$1"; if [[ "${REGISTRY_REPO_EXPLICIT}" == "true" ]]; then echo "${REGISTRY_REPO}/$(image_name_tag_from_ref "${default_ref}")"; else echo "${default_ref}"; fi; }
+image_name_from_ref(){ local ref="$1"; local name_tag="${ref##*/}"; echo "${name_tag%%:*}"; }
+image_name_tag_from_ref(){ local ref="$1"; echo "${ref##*/}"; }
+resolve_target_ref(){ local default_ref="$1"; if [[ "${REGISTRY_REPO_EXPLICIT}" == "true" ]]; then echo "${REGISTRY_REPO}/$(image_name_tag_from_ref "${default_ref}")"; else echo "${default_ref}"; fi; }
+declare -A IMAGE_DEFAULT_TARGETS=(); declare -A IMAGE_EFFECTIVE_TARGETS=(); declare -A IMAGE_LOAD_REFS=()
+load_image_metadata(){ while IFS=$'\t' read -r tar_name load_ref default_target_ref; do [[ -n "${tar_name}" ]] || continue; IMAGE_LOAD_REFS["${tar_name}"]="${load_ref}"; IMAGE_DEFAULT_TARGETS["${tar_name}"]="${default_target_ref}"; IMAGE_EFFECTIVE_TARGETS["${tar_name}"]="$(resolve_target_ref "${default_target_ref}")"; done < "${IMAGE_INDEX}"; }
+find_image_ref_by_name(){ local wanted_name="$1" tar_name; for tar_name in "${!IMAGE_EFFECTIVE_TARGETS[@]}"; do if [[ "$(image_name_from_ref "${IMAGE_EFFECTIVE_TARGETS[${tar_name}]}")" == "${wanted_name}" ]]; then echo "${IMAGE_EFFECTIVE_TARGETS[${tar_name}]}"; return 0; fi; done; return 1; }
 
-declare -A IMAGE_DEFAULT_TARGETS=()
-declare -A IMAGE_EFFECTIVE_TARGETS=()
-declare -A IMAGE_LOAD_REFS=()
-
-load_image_metadata() {
-  while IFS=$'\t' read -r tar_name load_ref default_target_ref; do
-    [[ -n "${tar_name}" ]] || continue
-    IMAGE_LOAD_REFS["${tar_name}"]="${load_ref}"
-    IMAGE_DEFAULT_TARGETS["${tar_name}"]="${default_target_ref}"
-    IMAGE_EFFECTIVE_TARGETS["${tar_name}"]="$(resolve_target_ref "${default_target_ref}")"
-  done < "${IMAGE_INDEX}"
-}
-
-find_image_ref_by_name() {
-  local wanted_name="$1" tar_name
-  for tar_name in "${!IMAGE_EFFECTIVE_TARGETS[@]}"; do
-    if [[ "$(image_name_from_ref "${IMAGE_EFFECTIVE_TARGETS[${tar_name}]}")" == "${wanted_name}" ]]; then echo "${IMAGE_EFFECTIVE_TARGETS[${tar_name}]}"; return 0; fi
-  done
-  return 1
-}
-
-docker_login() {
-  local registry_host="${REGISTRY_REPO%%/*}"
-  log "Logging into registry ${registry_host}"
-  if ! echo "${REGISTRY_PASS}" | docker login "${registry_host}" -u "${REGISTRY_USER}" --password-stdin >/dev/null 2>&1; then warn "docker login failed for ${registry_host}; continuing and letting push decide"; fi
-}
-
-prepare_images() {
+docker_login(){ local registry_host="${REGISTRY_REPO%%/*}"; log "Logging into registry ${registry_host}"; if ! echo "${REGISTRY_PASS}" | docker login "${registry_host}" -u "${REGISTRY_USER}" --password-stdin >/dev/null 2>&1; then warn "docker login failed for ${registry_host}; continuing and letting push decide"; fi; }
+prepare_images(){
   [[ "${SKIP_IMAGE_PREPARE}" == "true" ]] && { log "Skipping image prepare because --skip-image-prepare was requested"; return 0; }
   docker_login
   local tar_name load_ref default_target_ref target_ref tar_path
   while IFS=$'\t' read -r tar_name load_ref default_target_ref; do
-    [[ -n "${tar_name}" ]] || continue
-    tar_path="${IMAGE_DIR}/${tar_name}"
-    [[ -f "${tar_path}" ]] || die "Missing image tar: ${tar_path}"
-    target_ref="${IMAGE_EFFECTIVE_TARGETS[${tar_name}]}"
-    log "Loading ${tar_name}"
-    docker load -i "${tar_path}" >/dev/null
+    [[ -n "${tar_name}" ]] || continue; tar_path="${IMAGE_DIR}/${tar_name}"; [[ -f "${tar_path}" ]] || die "Missing image tar: ${tar_path}"
+    target_ref="${IMAGE_EFFECTIVE_TARGETS[${tar_name}]}"; log "Loading ${tar_name}"; docker load -i "${tar_path}" >/dev/null
     if [[ "${load_ref}" != "${target_ref}" ]]; then log "Tagging ${load_ref} -> ${target_ref}"; docker tag "${load_ref}" "${target_ref}"; fi
-    log "Pushing ${target_ref}"
-    docker push "${target_ref}"
+    log "Pushing ${target_ref}"; docker push "${target_ref}"
   done < "${IMAGE_INDEX}"
   success "Image prepare completed"
 }
 
-ensure_namespace() { if ! kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then log "Creating namespace ${NAMESPACE}"; kubectl create namespace "${NAMESPACE}" >/dev/null; fi; }
+ensure_namespace(){ if ! kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then log "Creating namespace ${NAMESPACE}"; kubectl create namespace "${NAMESPACE}" >/dev/null; fi; }
+create_secret(){ log "Creating or updating ${RELEASE_NAME}-secrets"; kubectl -n "${NAMESPACE}" create secret generic "${RELEASE_NAME}-secrets" --from-literal=root-password="${ROOT_PASSWORD}" --from-literal=casdoor-client-secret="${OIDC_CLIENT_SECRET}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null; }
 
-create_secret() {
-  log "Creating or updating ${RELEASE_NAME}-secrets"
-  kubectl -n "${NAMESPACE}" create secret generic "${RELEASE_NAME}-secrets" \
-    --from-literal=root-password="${ROOT_PASSWORD}" \
-    --from-literal=casdoor-client-secret="${OIDC_CLIENT_SECRET}" \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-}
-
-build_oidc_config_file() {
-  local out="$1"
-  : > "${out}"
-  if [[ "${ENABLE_OIDC}" != "true" ]]; then
-    cat >> "${out}" <<'OIDC_DISABLED'
+build_oidc_config_file(){
+  local out="$1"; : > "${out}"
+  if [[ "${ENABLE_OIDC}" != "true" ]]; then cat >> "${out}" <<'OIDC_DISABLED'
     gitlab_rails['omniauth_enabled'] = false
 OIDC_DISABLED
     return 0
   fi
-  local auto_sign_in=""
-  if [[ "${OIDC_AUTO_SIGN_IN}" == "true" ]]; then auto_sign_in="    gitlab_rails['omniauth_auto_sign_in_with_provider'] = 'openid_connect'"; fi
+  local auto_sign_in=""; if [[ "${OIDC_AUTO_SIGN_IN}" == "true" ]]; then auto_sign_in="    gitlab_rails['omniauth_auto_sign_in_with_provider'] = 'openid_connect'"; fi
   cat >> "${out}" <<OIDC_ENABLED
     gitlab_rails['omniauth_enabled'] = true
     gitlab_rails['omniauth_allow_single_sign_on'] = ['openid_connect']
@@ -353,97 +341,109 @@ ${auto_sign_in}
         name: 'openid_connect',
         label: '${OIDC_PROVIDER_LABEL}',
         args: {
-          name: 'openid_connect',
-          scope: '${OIDC_SCOPE}',
-          response_type: 'code',
-          issuer: '${OIDC_ISSUER}',
-          discovery: true,
-          client_auth_method: 'query',
-          uid_field: '${OIDC_UID_FIELD}',
-          pkce: true,
-          client_options: {
-            identifier: '${OIDC_CLIENT_ID}',
-            secret: ENV['CASDOOR_CLIENT_SECRET'],
-            redirect_uri: '${OIDC_REDIRECT_URI}'
-          }
+          name: 'openid_connect', scope: '${OIDC_SCOPE}', response_type: 'code', issuer: '${OIDC_ISSUER}', discovery: true,
+          client_auth_method: 'query', uid_field: '${OIDC_UID_FIELD}', pkce: true,
+          client_options: { identifier: '${OIDC_CLIENT_ID}', secret: ENV['CASDOOR_CLIENT_SECRET'], redirect_uri: '${OIDC_REDIRECT_URI}' }
         }
       }
     ]
 OIDC_ENABLED
 }
 
-replace_placeholders() {
+replace_placeholders(){
   local line="$1"
-  line="${line//__NAMESPACE__/${NAMESPACE}}"
-  line="${line//__RELEASE_NAME__/${RELEASE_NAME}}"
-  line="${line//__HOSTNAME__/${HOSTNAME}}"
-  line="${line//__EXTERNAL_URL__/${EXTERNAL_URL}}"
-  line="${line//__TIMEZONE__/${TIMEZONE}}"
-  line="${line//__GITLAB_IMAGE__/${GITLAB_IMAGE}}"
-  line="${line//__IMAGE_PULL_POLICY__/${IMAGE_PULL_POLICY}}"
-  line="${line//__STORAGE_CLASS__/${STORAGE_CLASS}}"
-  line="${line//__CONFIG_STORAGE_SIZE__/${CONFIG_STORAGE_SIZE}}"
-  line="${line//__LOGS_STORAGE_SIZE__/${LOGS_STORAGE_SIZE}}"
-  line="${line//__DATA_STORAGE_SIZE__/${DATA_STORAGE_SIZE}}"
-  line="${line//__CPU_REQUEST__/${CPU_REQUEST}}"
-  line="${line//__CPU_LIMIT__/${CPU_LIMIT}}"
-  line="${line//__MEMORY_REQUEST__/${MEMORY_REQUEST}}"
-  line="${line//__MEMORY_LIMIT__/${MEMORY_LIMIT}}"
-  line="${line//__PUMA_WORKERS__/${PUMA_WORKERS}}"
-  line="${line//__SIDEKIQ_CONCURRENCY__/${SIDEKIQ_CONCURRENCY}}"
-  line="${line//__ENABLE_EMBEDDED_PROMETHEUS__/${ENABLE_EMBEDDED_PROMETHEUS}}"
-  line="${line//__GATEWAY_NAME__/${GATEWAY_NAME}}"
-  line="${line//__GATEWAY_NAMESPACE__/${GATEWAY_NAMESPACE}}"
-  line="${line//__GATEWAY_HTTP_SECTION__/${GATEWAY_HTTP_SECTION}}"
-  line="${line//__GATEWAY_SSH_SECTION__/${GATEWAY_SSH_SECTION}}"
-  line="${line//__SSH_EXTERNAL_PORT__/${SSH_EXTERNAL_PORT}}"
+  line="${line//__NAMESPACE__/${NAMESPACE}}"; line="${line//__RELEASE_NAME__/${RELEASE_NAME}}"; line="${line//__HOSTNAME__/${HOSTNAME}}"; line="${line//__EXTERNAL_URL__/${EXTERNAL_URL}}"; line="${line//__TIMEZONE__/${TIMEZONE}}"
+  line="${line//__GITLAB_IMAGE__/${GITLAB_IMAGE}}"; line="${line//__IMAGE_PULL_POLICY__/${IMAGE_PULL_POLICY}}"; line="${line//__STORAGE_CLASS__/${STORAGE_CLASS}}"; line="${line//__CONFIG_STORAGE_SIZE__/${CONFIG_STORAGE_SIZE}}"; line="${line//__LOGS_STORAGE_SIZE__/${LOGS_STORAGE_SIZE}}"; line="${line//__DATA_STORAGE_SIZE__/${DATA_STORAGE_SIZE}}"
+  line="${line//__CPU_REQUEST__/${CPU_REQUEST}}"; line="${line//__CPU_LIMIT__/${CPU_LIMIT}}"; line="${line//__MEMORY_REQUEST__/${MEMORY_REQUEST}}"; line="${line//__MEMORY_LIMIT__/${MEMORY_LIMIT}}"; line="${line//__PUMA_WORKERS__/${PUMA_WORKERS}}"; line="${line//__SIDEKIQ_CONCURRENCY__/${SIDEKIQ_CONCURRENCY}}"; line="${line//__ENABLE_EMBEDDED_PROMETHEUS__/${ENABLE_EMBEDDED_PROMETHEUS}}"
+  line="${line//__GATEWAY_NAME__/${GATEWAY_NAME}}"; line="${line//__GATEWAY_NAMESPACE__/${GATEWAY_NAMESPACE}}"; line="${line//__GATEWAY_HTTP_SECTION__/${GATEWAY_HTTP_SECTION}}"; line="${line//__GATEWAY_SSH_SECTION__/${GATEWAY_SSH_SECTION}}"; line="${line//__SSH_EXTERNAL_PORT__/${SSH_EXTERNAL_PORT}}"
   printf '%s\n' "${line}"
 }
+render_template(){ local template="$1" output="$2" oidc_config_file="$3" line; : > "${output}"; while IFS= read -r line || [[ -n "${line}" ]]; do if [[ "${line}" == "__OIDC_CONFIG__" ]]; then cat "${oidc_config_file}" >> "${output}"; else replace_placeholders "${line}" >> "${output}"; fi; done < "${template}"; }
+render_and_apply(){ local template="$1" rendered="$2" oidc_config_file="$3"; render_template "${template}" "${rendered}" "${oidc_config_file}"; kubectl apply -f "${rendered}"; }
+has_crd(){ local crd="$1"; kubectl get crd "${crd}" >/dev/null 2>&1; }
 
-render_template() {
-  local template="$1" output="$2" oidc_config_file="$3" line
-  : > "${output}"
-  while IFS= read -r line || [[ -n "${line}" ]]; do
-    if [[ "${line}" == "__OIDC_CONFIG__" ]]; then cat "${oidc_config_file}" >> "${output}"; else replace_placeholders "${line}" >> "${output}"; fi
-  done < "${template}"
-}
-
-render_and_apply() { local template="$1" rendered="$2" oidc_config_file="$3"; render_template "${template}" "${rendered}" "${oidc_config_file}"; kubectl apply -f "${rendered}"; }
-has_crd() { local crd="$1"; kubectl get crd "${crd}" >/dev/null 2>&1; }
-
-apply_gateway_routes() {
-  local oidc_config_file="$1"
-  [[ "${ENABLE_GATEWAY}" == "true" ]] || return 0
-  if ! has_crd "httproutes.gateway.networking.k8s.io"; then
-    if [[ "${REQUIRE_GATEWAY}" == "true" ]]; then die "HTTPRoute CRD not found; install Envoy Gateway/Gateway API first or remove --require-gateway"; fi
-    warn "HTTPRoute CRD not found; skipping Gateway API HTTPRoute"
-    return 0
-  fi
+apply_gateway_routes(){
+  local oidc_config_file="$1"; [[ "${ENABLE_GATEWAY}" == "true" ]] || return 0
+  if ! has_crd "httproutes.gateway.networking.k8s.io"; then if [[ "${REQUIRE_GATEWAY}" == "true" ]]; then die "HTTPRoute CRD not found; install Envoy Gateway/Gateway API first or remove --require-gateway"; fi; warn "HTTPRoute CRD not found; skipping Gateway API HTTPRoute"; return 0; fi
   render_and_apply "${MANIFEST_DIR}/50-httproute.yaml.tmpl" "${WORKDIR}/50-httproute.yaml" "${oidc_config_file}"
-  if [[ "${ENABLE_SSH_ROUTE}" == "true" ]]; then
-    if has_crd "tcproutes.gateway.networking.k8s.io"; then render_and_apply "${MANIFEST_DIR}/55-tcproute.yaml.tmpl" "${WORKDIR}/55-tcproute.yaml" "${oidc_config_file}"; else warn "TCPRoute CRD not found; skipping SSH TCPRoute"; fi
-  fi
+  if [[ "${ENABLE_SSH_ROUTE}" == "true" ]]; then if has_crd "tcproutes.gateway.networking.k8s.io"; then render_and_apply "${MANIFEST_DIR}/55-tcproute.yaml.tmpl" "${WORKDIR}/55-tcproute.yaml" "${oidc_config_file}"; else warn "TCPRoute CRD not found; skipping SSH TCPRoute"; fi; fi
 }
 
-install_release() {
+ruby_escape_single_quoted(){ printf "%s" "$1" | sed "s/\\\\/\\\\\\\\/g; s/'/\\\\'/g"; }
+write_external_authz_runner(){
+  local out="$1" mode url label fail_on_unsupported
+  mode="$(ruby_escape_single_quoted "${EXTERNAL_AUTHZ_MODE}")"; url="$(ruby_escape_single_quoted "${EXTERNAL_AUTHZ_URL}")"; label="$(ruby_escape_single_quoted "${EXTERNAL_AUTHZ_DEFAULT_LABEL}")"; fail_on_unsupported="${EXTERNAL_AUTHZ_FAIL_ON_UNSUPPORTED}"
+  cat > "${out}" <<RUBY
+mode = '${mode}'
+service_url = '${url}'
+default_label = '${label}'
+fail_on_unsupported = ${fail_on_unsupported}
+settings = ApplicationSetting.current
+updates = {}
+missing = []
+set_if_supported = lambda do |key, value|
+  setter = "#{key}="
+  if settings.respond_to?(setter)
+    updates[key] = value
+  else
+    missing << key
+  end
+end
+case mode
+when 'enable'
+  set_if_supported.call(:external_authorization_service_enabled, true)
+  set_if_supported.call(:external_authorization_service_url, service_url)
+  set_if_supported.call(:external_authorization_service_default_label, default_label)
+when 'disable'
+  set_if_supported.call(:external_authorization_service_enabled, false)
+  set_if_supported.call(:external_authorization_service_url, '')
+else
+  puts 'External authorization mode is skip; no changes made.'
+  exit 0
+end
+if missing.any?
+  message = "GitLab ApplicationSetting does not expose expected external authorization fields: #{missing.join(', ')}"
+  raise message if fail_on_unsupported
+  puts "[WARN] #{message}"
+end
+if updates.empty?
+  puts 'No supported external authorization settings found; no changes made.'
+  exit 0
+end
+settings.update!(updates)
+puts "External authorization settings updated: #{updates.keys.join(', ')}"
+RUBY
+}
+run_gitlab_rails_script(){
+  local script_file="$1" attempt=1 max_attempts=$((EXTERNAL_AUTHZ_RETRIES + 1))
+  while (( attempt <= max_attempts )); do
+    log "Running GitLab Rails configuration script, attempt ${attempt}/${max_attempts}"
+    if kubectl -n "${NAMESPACE}" exec "statefulset/${RELEASE_NAME}" -- bash -lc 'cat >/tmp/archinfra-gitlab-config.rb && gitlab-rails runner /tmp/archinfra-gitlab-config.rb' < "${script_file}"; then return 0; fi
+    if (( attempt == max_attempts )); then return 1; fi
+    warn "GitLab Rails is not ready for external authz configuration yet; retrying in ${EXTERNAL_AUTHZ_RETRY_INTERVAL}s"; sleep "${EXTERNAL_AUTHZ_RETRY_INTERVAL}"; attempt=$((attempt + 1))
+  done
+}
+configure_external_authz(){
+  [[ "${EXTERNAL_AUTHZ_MODE}" != "skip" ]] || return 0
+  local runner_file="${WORKDIR}/external-authz-runner.rb"; section "配置 GitLab external authorization"; write_external_authz_runner "${runner_file}"
+  run_gitlab_rails_script "${runner_file}" || die "Failed to configure GitLab external authorization"
+  success "GitLab external authorization mode applied: ${EXTERNAL_AUTHZ_MODE}"
+}
+
+install_release(){
   GITLAB_IMAGE="$(find_image_ref_by_name "gitlab-ce")" || die "Unable to resolve gitlab-ce image"
-  local oidc_config_file="${WORKDIR}/oidc-config.rb"
-  build_oidc_config_file "${oidc_config_file}"
-  ensure_namespace
-  create_secret
+  local oidc_config_file="${WORKDIR}/oidc-config.rb"; build_oidc_config_file "${oidc_config_file}"; ensure_namespace; create_secret
   render_and_apply "${MANIFEST_DIR}/10-configmap.yaml.tmpl" "${WORKDIR}/10-configmap.yaml" "${oidc_config_file}"
   render_and_apply "${MANIFEST_DIR}/20-service.yaml.tmpl" "${WORKDIR}/20-service.yaml" "${oidc_config_file}"
   render_and_apply "${MANIFEST_DIR}/30-statefulset.yaml.tmpl" "${WORKDIR}/30-statefulset.yaml" "${oidc_config_file}"
   render_and_apply "${MANIFEST_DIR}/40-pdb.yaml.tmpl" "${WORKDIR}/40-pdb.yaml" "${oidc_config_file}"
   apply_gateway_routes "${oidc_config_file}"
-  section "等待 GitLab StatefulSet 就绪"
-  kubectl rollout status "statefulset/${RELEASE_NAME}" -n "${NAMESPACE}" --timeout="${WAIT_TIMEOUT}"
+  section "等待 GitLab StatefulSet 就绪"; kubectl rollout status "statefulset/${RELEASE_NAME}" -n "${NAMESPACE}" --timeout="${WAIT_TIMEOUT}"
+  configure_external_authz
   success "GitLab install or upgrade completed"
 }
-
-show_post_install_info() {
-  section "部署结果"
-  kubectl get statefulset,pods,svc,pvc -n "${NAMESPACE}" -l "app.kubernetes.io/instance=${RELEASE_NAME}" || true
+show_post_install_info(){
+  section "部署结果"; kubectl get statefulset,pods,svc,pvc -n "${NAMESPACE}" -l "app.kubernetes.io/instance=${RELEASE_NAME}" || true
   if has_crd "httproutes.gateway.networking.k8s.io"; then echo; kubectl get httproute -n "${NAMESPACE}" "${RELEASE_NAME}-http" || true; fi
   if has_crd "tcproutes.gateway.networking.k8s.io"; then echo; kubectl get tcproute -n "${NAMESPACE}" "${RELEASE_NAME}-ssh" || true; fi
   cat <<EOF_INFO
@@ -455,51 +455,23 @@ Root login:
   username: root
   password: use the value passed by --root-password on first initialization
 
-Casdoor redirect URI when OIDC is enabled:
+OIDC redirect URI when OIDC is enabled:
   ${OIDC_REDIRECT_URI}
+
+External authorization:
+  mode: ${EXTERNAL_AUTHZ_MODE}
+  url : ${EXTERNAL_AUTHZ_URL:-<not configured>}
+  default classification label: ${EXTERNAL_AUTHZ_DEFAULT_LABEL}
 
 Notes:
   First boot can take several minutes because Omnibus initializes PostgreSQL, Redis, Gitaly and Rails.
   PVCs are preserved on uninstall unless --delete-pvc is explicitly used.
 EOF_INFO
 }
+status_release(){ section "GitLab 状态"; kubectl get statefulset,pods,svc,pvc -n "${NAMESPACE}" -l "app.kubernetes.io/instance=${RELEASE_NAME}" || true; echo; kubectl describe statefulset "${RELEASE_NAME}" -n "${NAMESPACE}" 2>/dev/null | sed -n '1,120p' || true; if has_crd "httproutes.gateway.networking.k8s.io"; then echo; kubectl get httproute -n "${NAMESPACE}" "${RELEASE_NAME}-http" || true; fi; if has_crd "tcproutes.gateway.networking.k8s.io"; then echo; kubectl get tcproute -n "${NAMESPACE}" "${RELEASE_NAME}-ssh" || true; fi; }
+uninstall_release(){ section "卸载 GitLab 资源"; if has_crd "tcproutes.gateway.networking.k8s.io"; then kubectl delete tcproute "${RELEASE_NAME}-ssh" -n "${NAMESPACE}" --ignore-not-found=true; fi; if has_crd "httproutes.gateway.networking.k8s.io"; then kubectl delete httproute "${RELEASE_NAME}-http" -n "${NAMESPACE}" --ignore-not-found=true; fi; kubectl delete pdb "${RELEASE_NAME}" -n "${NAMESPACE}" --ignore-not-found=true; kubectl delete statefulset "${RELEASE_NAME}" -n "${NAMESPACE}" --ignore-not-found=true; kubectl delete svc "${RELEASE_NAME}" -n "${NAMESPACE}" --ignore-not-found=true; kubectl delete configmap "${RELEASE_NAME}-config" -n "${NAMESPACE}" --ignore-not-found=true; kubectl delete secret "${RELEASE_NAME}-secrets" -n "${NAMESPACE}" --ignore-not-found=true; if [[ "${DELETE_PVC}" == "true" ]]; then warn "Deleting PVCs for ${RELEASE_NAME} in ${NAMESPACE}"; kubectl delete pvc -n "${NAMESPACE}" -l "app.kubernetes.io/instance=${RELEASE_NAME}" --ignore-not-found=true; else warn "PVCs are preserved. Use --delete-pvc to remove data volumes explicitly."; fi; success "Uninstall completed"; }
 
-status_release() {
-  section "GitLab 状态"
-  kubectl get statefulset,pods,svc,pvc -n "${NAMESPACE}" -l "app.kubernetes.io/instance=${RELEASE_NAME}" || true
-  echo
-  kubectl describe statefulset "${RELEASE_NAME}" -n "${NAMESPACE}" 2>/dev/null | sed -n '1,120p' || true
-  if has_crd "httproutes.gateway.networking.k8s.io"; then echo; kubectl get httproute -n "${NAMESPACE}" "${RELEASE_NAME}-http" || true; fi
-  if has_crd "tcproutes.gateway.networking.k8s.io"; then echo; kubectl get tcproute -n "${NAMESPACE}" "${RELEASE_NAME}-ssh" || true; fi
-}
-
-uninstall_release() {
-  section "卸载 GitLab 资源"
-  if has_crd "tcproutes.gateway.networking.k8s.io"; then kubectl delete tcproute "${RELEASE_NAME}-ssh" -n "${NAMESPACE}" --ignore-not-found=true; fi
-  if has_crd "httproutes.gateway.networking.k8s.io"; then kubectl delete httproute "${RELEASE_NAME}-http" -n "${NAMESPACE}" --ignore-not-found=true; fi
-  kubectl delete pdb "${RELEASE_NAME}" -n "${NAMESPACE}" --ignore-not-found=true
-  kubectl delete statefulset "${RELEASE_NAME}" -n "${NAMESPACE}" --ignore-not-found=true
-  kubectl delete svc "${RELEASE_NAME}" -n "${NAMESPACE}" --ignore-not-found=true
-  kubectl delete configmap "${RELEASE_NAME}-config" -n "${NAMESPACE}" --ignore-not-found=true
-  kubectl delete secret "${RELEASE_NAME}-secrets" -n "${NAMESPACE}" --ignore-not-found=true
-  if [[ "${DELETE_PVC}" == "true" ]]; then warn "Deleting PVCs for ${RELEASE_NAME} in ${NAMESPACE}"; kubectl delete pvc -n "${NAMESPACE}" -l "app.kubernetes.io/instance=${RELEASE_NAME}" --ignore-not-found=true; else warn "PVCs are preserved. Use --delete-pvc to remove data volumes explicitly."; fi
-  success "Uninstall completed"
-}
-
-main() {
-  parse_args "$@"
-  normalize_flags
-  if [[ "${ACTION}" == "help" ]]; then usage; exit 0; fi
-  check_deps
-  confirm
-  case "${ACTION}" in
-    install) extract_payload; load_image_metadata; prepare_images; install_release; show_post_install_info ;;
-    status) status_release ;;
-    uninstall) uninstall_release ;;
-    *) usage; die "Unsupported action: ${ACTION}" ;;
-  esac
-}
-
+main(){ parse_args "$@"; normalize_flags; if [[ "${ACTION}" == "help" ]]; then usage; exit 0; fi; check_deps; confirm; case "${ACTION}" in install) extract_payload; load_image_metadata; prepare_images; install_release; show_post_install_info ;; status) status_release ;; uninstall) uninstall_release ;; *) usage; die "Unsupported action: ${ACTION}" ;; esac; }
 main "$@"
 exit 0
 
